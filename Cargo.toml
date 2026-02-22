@@ -4,6 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-web-server = { git = "https://github.com/RovarisTales/rust-multithread" , branch = "main" }
-dashmap = "6.1.0"
 evdev = "0.13.2"

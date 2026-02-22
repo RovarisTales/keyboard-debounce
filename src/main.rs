@@ -1,10 +1,8 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
-use dashmap::DashSet;
-use evdev::{Device, EventSummary};
-use web_server::ThreadPool;
+use evdev::{Device, EventType, InputEvent, KeyCode};
+use evdev::EventSummary::Key;
+use evdev::uinput::{VirtualDevice};
 
 fn main() {
     println!("starting program");
@@ -36,7 +34,17 @@ fn main() {
 
  */
 fn initialize_debounce_timer(mut main_device: Device) {
-    //    main_device.grab();
+    let mut virtual_keyboard;
+    match main_device.grab()  {
+        Err(err) => panic!("grab error: {}", err),
+        Ok(_) => {
+            virtual_keyboard = VirtualDevice::builder().unwrap()
+                .name("Virtual Wooting")
+                .input_id(main_device.input_id())
+                .with_keys(main_device.supported_keys().unwrap())
+                .unwrap().build().unwrap();
+        }
+    };
     //  code 1 is for press , code 0a is for release
 
     /*
@@ -49,58 +57,49 @@ fn initialize_debounce_timer(mut main_device: Device) {
         set 2 for release timer
         when pressing add to press timer
         when releasing remove from press timer and add to release timer
+        no need for threads, events from keyboard are sequential on evdev, parallelism adds complexity and very to little performance gain
+*/
+    let mut press_map: HashMap<u16, Instant> = HashMap::new();
 
 
-    let press_set: Arc<DashSet<u16>> = Arc::new(DashSet::new());
-    let release_set: Arc<DashSet<u16>> = Arc::new(DashSet::new());
-    let thread_pool: ThreadPool = ThreadPool::new(8);
-    let mut key_hash_map_press: HashMap<u16,Instant> = HashMap::new();
-    let mut key_hash_map_release: HashMap<u16,Instant> = HashMap::new();
 
-     */
-    let mut press_map: HashMap<u16, Vec<Instant>> = HashMap::new();
-    let mut release_map: HashMap<u16, Vec<Instant>> = HashMap::new();
-
-
-    loop {
+    const KEYCODE_1: u16 = 47;
+    const KEYCODE_2: u16 = 48;
+    'main: loop {
         for  event in main_device.fetch_events().unwrap() {
             match event.destructure() {
-                EventSummary::Key(_, key, 1) if key == evdev::KeyCode::KEY_1 => {
-                    println!("press map for key 47 {:?}", press_map.entry(47));
-                    println!("release map for key 47 {:?}", release_map.entry(47));
-                    println!("press map for key 47 {:?}", press_map.entry(48));
-                    println!("release map for key 47 {:?}", release_map.entry(48));
+                Key(_, KeyCode::KEY_9, 1) => {
+                    println!("shutting down program");
+                    break 'main;
+                },
+                //press
+                Key(_, key, 1) => {
+                    let now = Instant::now();
+                    let should_supress = {
+                        let key_to_check = match key.code() {
+                            KEYCODE_1 => Some(KEYCODE_2),
+                            KEYCODE_2 => Some(KEYCODE_1),
+                            _ => None,
+                        };
+                        key_to_check
+                            .and_then( |key_code| press_map.get(&key_code))
+                            .is_some_and(|inst| now - *inst < Duration::from_millis(15))
+                    };
+
+                    if should_supress {
+                        println!("Double tap recognized for key {}, ignoring", key.code())
+                    } else {
+                        let input = InputEvent::new(EventType::KEY.0, key.code(), 1);
+                        virtual_keyboard.emit(&[input]).expect("Virtual keyboard emit failed");
+                    }
+
+                    press_map.insert(key.code(), now);
 
                 },
-                EventSummary::Key(_, key, 1) => {
-                    /*
-                    let key_code = key.code();
-                    let press_c = Arc::clone(&press_set);
-                    let release_c = Arc::clone(&release_set);
-                    thread_pool.execute(move || {
-                        handle_key_press(key_code, press_c, release_c);
-                    });
-
-                     */
-                    press_map.entry(key.code())
-                        .or_insert_with(Vec::new)
-                        .push(Instant::now());
-                },
-
-                EventSummary::Key(_, key, 0) => {
-                    /*
-                    let key_code = key.code();
-                    let press_c = Arc::clone(&press_set);
-                    let release_c = Arc::clone(&release_set);
-                    thread_pool.execute(move || {
-                        handle_key_release(key_code, press_c, release_c);
-                    });
-
-                     */
-                    release_map.entry(key.code())
-                        .or_insert_with(Vec::new)
-                        .push(Instant::now());
-
+                //release and repeat
+                Key(_, key, val) => {
+                    let input = InputEvent::new(EventType::KEY.0, key.code(), val);
+                    virtual_keyboard.emit(&[input]).expect("Virtual keyboard emit failed");
                 },
 
 
@@ -108,39 +107,5 @@ fn initialize_debounce_timer(mut main_device: Device) {
             }
         }
     }
+    main_device.ungrab().expect("UNGRAB FAILED RESTART PC");
 }
-
-fn handle_key_press(key: u16, press_set: Arc<DashSet<u16>>, release_set: Arc<DashSet<u16>>) {
-    if release_set.contains(&key) {
-        // case where key was released but timer is not over yet
-        println!("ALERT OF DOUBLE TAP RELEASE HANDLE THIS CASE FOR THIS KEY: {}", key);
-        return;
-    }
-    if press_set.contains(&key) {
-        // case where key is pressed and new event comes in
-        println!("ALERT OF DOUBLE TAP PRESS HANDLE THIS CASE FOR THIS KEY: {}", key);
-        return;
-    }
-    press_set.insert(key);
-    // add none of those were true, press key and allow input
-    // println!("happy path");
-}
-
-/// Handles release events to the virtual keyboard
-///
-/// sends release event to virtual keyboard
-fn handle_key_release(key: u16, press_set: Arc<DashSet<u16>>, release_set: Arc<DashSet<u16>>) {
-    // key NEEDS to be in press set or else something wrong is going on
-    // open statement is wrong, key is removed from pressed set as the first action and then can be released without having beeing pressed
-
-    press_set.remove(&key);
-    release_set.insert(key);
-    thread::sleep(Duration::from_millis(1000));
-    release_set.remove(&key);
-    //println!("key released successfully");
-
-}
-// press
-// release
-// press (goes into return clause)
-// release -> panic
